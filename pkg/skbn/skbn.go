@@ -111,14 +111,10 @@ func PerformCopy(srcClient, dstClient interface{}, srcPrefix, dstPrefix string, 
 	}
 	bwgSize := int(math.Min(float64(parallel), float64(totalFiles))) // Very stingy :)
 	bwg := utils.NewBoundedWaitGroup(bwgSize)
+	var skippedFiles []string
 	errc := make(chan error, 1)
 	currentLine := 0
 	for _, ftp := range fromToPaths {
-
-		if len(errc) != 0 {
-			break
-		}
-
 		bwg.Add(1)
 		currentLine++
 
@@ -126,10 +122,6 @@ func PerformCopy(srcClient, dstClient interface{}, srcPrefix, dstPrefix string, 
 		currentLinePadded := utils.LeftPad2Len(currentLine, 0, totalDigits)
 
 		go func(srcClient, dstClient interface{}, srcPrefix, fromPath, dstPrefix, toPath, currentLinePadded string, totalFiles int) {
-
-			if len(errc) != 0 {
-				return
-			}
 
 			newBufferSize := (int64)(bufferSize * 1024 * 1024) // may not be super accurate
 			buf := buffer.New(newBufferSize)
@@ -139,9 +131,7 @@ func PerformCopy(srcClient, dstClient interface{}, srcPrefix, dstPrefix string, 
 
 			go func() {
 				defer pw.Close()
-				if len(errc) != 0 {
-					return
-				}
+
 				err := Download(srcClient, srcPrefix, fromPath, pw)
 				if err != nil {
 					log.Println(err, fmt.Sprintf(" src: file: %s", fromPath))
@@ -163,16 +153,18 @@ func PerformCopy(srcClient, dstClient interface{}, srcPrefix, dstPrefix string, 
 				}
 			}()
 		}(srcClient, dstClient, srcPrefix, ftp.FromPath, dstPrefix, ftp.ToPath, currentLinePadded, totalFiles)
+
+		bwg.Wait()
+		if len(errc) != 0 {
+			<-errc
+			skippedFiles = append(skippedFiles, ftp.FromPath)
+		}
 	}
-	bwg.Wait()
-	if len(errc) != 0 {
-		// This is not exactly the correct behavior
-		// There may be more than 1 error in the channel
-		// But first let's make it work
-		err := <-errc
-		close(errc)
-		if err != nil {
-			return err
+	close(errc)
+	if len(skippedFiles) != 0 {
+		log.Println("Failed to copy files:")
+		for _, file := range skippedFiles {
+			log.Println(file)
 		}
 	}
 	return nil
